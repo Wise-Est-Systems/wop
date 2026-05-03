@@ -1,4 +1,4 @@
-"""WiseDigest-1 attack suite.
+"""WiseDigest attack suite (covers v0 and v1).
 
 These tests probe properties an attacker would exploit. PASSING does NOT prove
 security — a hash function with no analysis can still pass every cheap test.
@@ -239,4 +239,103 @@ def test_output_byte_distribution_is_near_uniform():
         assert low <= c <= high, (
             f"byte 0x{byte_value:02x} appears {c} times; expected ~{expected_per_value:.0f} "
             f"(window [{low:.0f},{high:.0f}])"
+        )
+
+
+# =============================================================================
+# v0.1.1 — explicit attack coverage for WiseDigest-0 (the shipped algorithm)
+# =============================================================================
+# The tests above target WiseDigest-1 via _digest_raw. WiseDigest-0 is the
+# default in v0.1.1 — it deserves its own attack-suite section.
+
+
+def _v0_digest_bytes(data: bytes) -> bytes:
+    """Run WiseDigest-0 and return the raw 32-byte output."""
+    return bytes.fromhex(digest_v0(data, "WiseDigest-0"))
+
+
+def _v0_digest_hex(data: bytes) -> str:
+    """Run WiseDigest-0 and return the 64-char lowercase hex output."""
+    return digest_v0(data, "WiseDigest-0")
+
+
+def test_v0_avalanche_single_bit_flip_distributes_output():
+    """Flipping one input bit must scatter ~50% of output bits for WD-0."""
+    rng = random.Random(0x0000_0001)
+    n_messages = 20
+    msg_len = 48
+    distances: list[int] = []
+    for _ in range(n_messages):
+        msg = bytes(rng.randint(0, 255) for _ in range(msg_len))
+        base = _v0_digest_bytes(msg)
+        for bit_pos in range(msg_len * 8):
+            mutated = bytearray(msg)
+            mutated[bit_pos // 8] ^= 1 << (bit_pos % 8)
+            mutated_d = _v0_digest_bytes(bytes(mutated))
+            distances.append(_hamming_bytes(base, mutated_d))
+    mean = sum(distances) / len(distances)
+    # Looser window for WD-0 since it is documented as experimental.
+    assert 110.0 <= mean <= 146.0, f"v0 avalanche mean {mean:.2f} outside [110,146]"
+
+
+def test_v0_random_pair_outputs_uncorrelated():
+    """Two unrelated random inputs produce ~uncorrelated WD-0 outputs."""
+    rng = random.Random(0x0000_0002)
+    distances: list[int] = []
+    for _ in range(200):
+        a = bytes(rng.randint(0, 255) for _ in range(rng.randint(1, 100)))
+        b = bytes(rng.randint(0, 255) for _ in range(rng.randint(1, 100)))
+        distances.append(_hamming_bytes(_v0_digest_bytes(a), _v0_digest_bytes(b)))
+    mean = sum(distances) / len(distances)
+    assert 110.0 <= mean <= 146.0, f"v0 differential mean {mean:.2f} outside [110,146]"
+
+
+def test_v0_short_inputs_distinct():
+    """All single-byte inputs (0..255) produce distinct WD-0 outputs."""
+    digests = {_v0_digest_hex(bytes([b])) for b in range(256)}
+    assert len(digests) == 256
+
+
+def test_v0_length_extension_resistant_in_practice():
+    """Given digest(M), an attacker should not trivially find digest(M||X)."""
+    rng = random.Random(0x0000_0003)
+    secret = bytes(rng.randint(0, 255) for _ in range(20))
+    extension = b"||attacker_appended"
+    real_extended = _v0_digest_hex(secret + extension)
+    # A naive "concatenate digest with extension and re-hash" must NOT match.
+    assert _v0_digest_hex(_v0_digest_bytes(secret) + extension) != real_extended
+
+
+def test_v0_output_byte_distribution_near_uniform():
+    """Across many WD-0 outputs, no output byte value is grossly biased."""
+    rng = random.Random(0x0000_0004)
+    counts = Counter()
+    for _ in range(2000):
+        msg = struct.pack(">Q", rng.getrandbits(64)) + bytes(rng.randint(0, 255) for _ in range(8))
+        counts.update(_v0_digest_bytes(msg))
+    total = sum(counts.values())
+    expected = total / 256
+    low, high = expected * 0.75, expected * 1.25
+    for byte_value in range(256):
+        c = counts.get(byte_value, 0)
+        assert low <= c <= high, (
+            f"WD-0 byte 0x{byte_value:02x} appears {c} times; expected ~{expected:.0f}"
+        )
+
+
+def test_v0_each_output_bit_position_is_balanced():
+    """Across many WD-0 outputs, each output bit position is ~50% ones."""
+    rng = random.Random(0x0000_0005)
+    n_trials = 1000
+    bit_counts = [0] * 256
+    for _ in range(n_trials):
+        msg = bytes(rng.randint(0, 255) for _ in range(rng.randint(1, 200)))
+        out = _v0_digest_bytes(msg)
+        for byte_pos in range(32):
+            for bit_pos in range(8):
+                bit_counts[byte_pos * 8 + bit_pos] += (out[byte_pos] >> bit_pos) & 1
+    # Each bit position should be 500 ± allowance.
+    for i, c in enumerate(bit_counts):
+        assert 0.40 * n_trials <= c <= 0.60 * n_trials, (
+            f"WD-0 output bit {i} biased: {c}/{n_trials} ones"
         )

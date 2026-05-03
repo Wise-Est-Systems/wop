@@ -80,6 +80,112 @@ def test_unsupported_algorithm_rejected():
         expand(b"x", algorithm="MD5")
 
 
+# ============================================================================
+# THE SOUL TESTS — `.wiseexp` actually does what it claims
+# ============================================================================
+# `.wiseexp` is the part of WISEATA most likely to be original — a layered
+# explainable structural fingerprint with no direct precedent. These tests
+# prove the layering claim is real: changes localize to the right layers.
+
+
+def test_wiseexp_localizes_difference_to_first16_only():
+    """Two artifacts identical except for the first 16 bytes: positional.first16
+    must differ; positional.last16 and positional.midpoint16 must be IDENTICAL."""
+    body = bytes(range(64)) + b"x" * 100  # 164 bytes total
+    a = bytes(range(16, 32)) + body[16:]
+    b = bytes(range(0, 16)) + body[16:]
+    ea = expand(a)
+    eb = expand(b)
+    assert ea["positional.first16"] != eb["positional.first16"], (
+        "first16 should differ when the first 16 bytes differ"
+    )
+    assert ea["positional.last16"] == eb["positional.last16"], (
+        "last16 should NOT differ when only the first 16 bytes differ"
+    )
+    assert ea["positional.midpoint16"] == eb["positional.midpoint16"], (
+        "midpoint16 should NOT differ when only the first 16 bytes differ"
+    )
+
+
+def test_wiseexp_localizes_difference_to_last16_only():
+    """Two artifacts identical except for the last 16 bytes: positional.last16
+    must differ; positional.first16 and midpoint16 must be IDENTICAL."""
+    head = bytes(range(64)) + b"x" * 100  # 164 bytes
+    a = head + bytes(range(0, 16))
+    b = head + bytes(range(16, 32))
+    ea = expand(a)
+    eb = expand(b)
+    assert ea["positional.first16"] == eb["positional.first16"]
+    assert ea["positional.midpoint16"] == eb["positional.midpoint16"]
+    assert ea["positional.last16"] != eb["positional.last16"]
+
+
+def test_wiseexp_frequency_layer_distinguishes_text_from_random():
+    """A text-shaped artifact has very different entropy from random bytes.
+    The frequency layer surfaces this; the byte layer does not (both produce
+    one opaque 256-bit digest). This is the explainability claim."""
+    rng = random.Random(0xF00D_BABE)
+    text_like = (b"the quick brown fox jumps over the lazy dog " * 20)[:512]
+    random_like = bytes(rng.randint(0, 255) for _ in range(512))
+    et = expand(text_like)
+    er = expand(random_like)
+    # Random data should be near-uniform → low chi-squared. Text data has a
+    # heavily skewed distribution → much higher chi-squared.
+    chi_text = int(et["frequency.chi_squared_milli"])
+    chi_rand = int(er["frequency.chi_squared_milli"])
+    assert chi_text > chi_rand * 5, (
+        f"Frequency layer failed to distinguish text (chi={chi_text}) "
+        f"from random (chi={chi_rand})"
+    )
+    # And Shannon entropy on random should approach 8 bits/byte; on
+    # repetitive text it's significantly lower.
+    h_text = int(et["frequency.shannon_milli"])
+    h_rand = int(er["frequency.shannon_milli"])
+    assert h_rand > h_text, (
+        f"Random ({h_rand} milliBits) should have higher entropy than text "
+        f"({h_text} milliBits)"
+    )
+
+
+def test_wiseexp_structural_layer_finds_long_runs():
+    """A file with a long run of one byte must have structural.longest_run
+    pointing at that byte and a length matching the run."""
+    artifact = b"prefix" + (b"\x00" * 200) + b"suffix"
+    e = expand(artifact)
+    assert int(e["structural.longest_run"]) >= 200
+    assert e["structural.longest_run_byte"] == "0x00"
+
+
+def test_wiseexp_byte_digest_changes_on_any_difference():
+    """The byte layer's digest is the bedrock: ANY one-byte difference
+    flips it. This is the floor below which `.wiseexp` cannot go."""
+    a = expand(b"hello world\n")
+    b = expand(b"hello world!")
+    assert a["artifact.byte_digest"] != b["artifact.byte_digest"]
+
+
+def test_wiseexp_wisemark_detects_any_layer_tampering():
+    """Tampering with ANY non-wisemark field must invalidate the wisemark.
+    This is the integrity proof for the expansion document itself, in the
+    same self-referential style as wise_id for .wiseproof."""
+    items = expand(b"hello world\n")
+    # Pick any data field and corrupt it.
+    items["frequency.shannon_milli"] = "999999"
+    assert verify_wisemark(items) is False
+
+
+def test_wiseexp_is_larger_than_input_on_purpose():
+    """`.wiseexp` is NOT a hash and NOT compression. It is *more* data than
+    the input. Guarantee this for small inputs where the property is most
+    important and easiest to verify."""
+    short_input = b"truth\n"
+    expansion = render(expand(short_input))
+    assert len(expansion) > len(short_input), (
+        f"expansion ({len(expansion)} bytes) is not larger than input "
+        f"({len(short_input)} bytes) — explainability claim violated"
+    )
+
+
 # -----------------------------------------------------------------------------
 # Layer 2 — positional
 # -----------------------------------------------------------------------------

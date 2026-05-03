@@ -11,13 +11,16 @@ Layout:
   "\n[END]\n"
 
 No compression. Both artifact and proof are byte-preserved.
+
+v0.1.1 hardening:
+    H3 — embedded proof section is capped at MAX_SEAL_PROOF_SECTION_BYTES.
 """
 
 from __future__ import annotations
 
 import struct
 
-from . import WISE_SEAL_HEADER
+from . import MAX_SEAL_PROOF_SECTION_BYTES, WISE_SEAL_HEADER
 from .format import FormatError
 
 
@@ -36,6 +39,11 @@ def pack(artifact_bytes: bytes, proof_bytes: bytes) -> bytes:
         raise SealError("artifact exceeds 4 GiB cap for WISESEAL-V1")
     if len(proof_bytes) > 0xFFFFFFFF:
         raise SealError("proof exceeds 4 GiB cap for WISESEAL-V1")
+    # H3: an honest proof is far below 1 MiB; refuse to pack a runaway proof.
+    if len(proof_bytes) > MAX_SEAL_PROOF_SECTION_BYTES:
+        raise SealError(
+            f"proof section exceeds {MAX_SEAL_PROOF_SECTION_BYTES} byte cap"
+        )
     parts = [
         _HEADER,
         _ART_TAG,
@@ -61,7 +69,9 @@ def unpack(data: bytes) -> tuple[bytes, bytes]:
         raise SealError("truncated before artifact length")
     (n,) = struct.unpack(">I", data[pos : pos + 4])
     pos += 4
-    if pos + n > len(data):
+    # C6 (defense in depth): subtraction-based check so a 32-bit port can
+    # never have pos+n wrap around to a small value.
+    if n > len(data) - pos:
         raise SealError("truncated artifact")
     artifact = data[pos : pos + n]
     pos += n
@@ -71,8 +81,16 @@ def unpack(data: bytes) -> tuple[bytes, bytes]:
     if pos + 4 > len(data):
         raise SealError("truncated before proof length")
     (m,) = struct.unpack(">I", data[pos : pos + 4])
+    # H3: refuse to allocate / read more than the proof-section cap.
+    if m > MAX_SEAL_PROOF_SECTION_BYTES:
+        raise SealError(
+            f"proof section exceeds {MAX_SEAL_PROOF_SECTION_BYTES} byte cap"
+        )
     pos += 4
-    if pos + m > len(data):
+    # C6 (defense in depth): use subtraction so pos+m can never overflow on
+    # a 32-bit target. In Python ints are arbitrary-precision so either form
+    # is fine; spec-§4 mandates this form for ports.
+    if m > len(data) - pos:
         raise SealError("truncated proof")
     proof = data[pos : pos + m]
     pos += m

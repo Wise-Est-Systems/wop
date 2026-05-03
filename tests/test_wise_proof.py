@@ -96,3 +96,62 @@ def test_sha256_supported():
 def test_unsupported_algorithm_rejected():
     with pytest.raises(ValueError):
         build_text_proof_items("x", algorithm="MD5")
+
+
+# ============================================================================
+# v0.1.1 hardening tests
+# ============================================================================
+
+
+def test_v0_1_1_attestation_field_is_set_to_self_declared():
+    items = build_text_proof_items("hi\n", created_at=FIXED_TIME)
+    assert items["origin.attestation"] == "self_declared"
+
+
+def test_v0_1_1_attestation_excluded_from_wise_id(tmp_path):
+    """wise_id must be stable across attestation states. A future v0.4
+    signed proof of the same artifact must have the same wise_id as a
+    v0.1.1 self_declared proof."""
+    items = build_text_proof_items("hi\n", created_at=FIXED_TIME)
+    id_with = compute_wise_id(items, items["measurement.algorithm"])
+
+    # Simulate: same artifact + creator + algo but no attestation field.
+    # We compute wise_id with a copy that omits attestation; the result
+    # must equal what build_text_proof_items produced.
+    items_no_att = {k: v for k, v in items.items() if k != "origin.attestation"}
+    # Don't recompute wise_id from a body missing the field — instead,
+    # confirm that compute_wise_id ignores attestation by construction.
+    id_without = compute_wise_id(items_no_att, items["measurement.algorithm"])
+    assert id_with == id_without == items["wise_id"]
+
+
+def test_v0_1_1_attestation_included_in_wise_seal(tmp_path):
+    """wise_seal MUST commit to the attestation value. Replacing it should
+    break wise_seal re-derivation."""
+    items = build_text_proof_items("hi\n", created_at=FIXED_TIME)
+    # We cannot legally set attestation to a non-allowed value here without
+    # also having to update wise_seal — just confirm the seal contains it.
+    seal_with = compute_wise_seal(items, items["measurement.algorithm"])
+    items_no_att = {k: v for k, v in items.items() if k != "origin.attestation"}
+    seal_without = compute_wise_seal(items_no_att, items["measurement.algorithm"])
+    assert seal_with != seal_without
+
+
+def test_v0_1_1_creator_homoglyph_rejected_at_build_time(tmp_path):
+    """build_*_proof_items() rejects non-ASCII creator immediately."""
+    p = _write(tmp_path, "demo.txt", b"truth\n")
+    with pytest.raises(ValueError):
+        build_file_proof_items(p, creator="Аnthropic", created_at=FIXED_TIME)
+
+
+def test_v0_1_1_creator_empty_rejected_at_build_time():
+    with pytest.raises(ValueError):
+        build_text_proof_items("x\n", creator="", created_at=FIXED_TIME)
+
+
+def test_v0_1_1_creator_ascii_punctuation_accepted():
+    """Printable ASCII includes punctuation: dots, parens, hyphens, etc."""
+    items = build_text_proof_items(
+        "x\n", creator="Wise.Est Systems (2026) - test", created_at=FIXED_TIME
+    )
+    assert items["origin.creator"] == "Wise.Est Systems (2026) - test"

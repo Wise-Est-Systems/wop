@@ -90,3 +90,77 @@ We will acknowledge within 7 days. Default coordinated disclosure timeline is 90
 ## Versioning and breaking changes
 
 Locked test vectors in `tests/test_locked_vectors.py` and `tests/test_wisedigest_*.py` are normative. They will not change within a `0.1.x` release line. Any change that would alter a locked vector requires a new minor version, an entry in `RELEASE_NOTES.md`, and an updated section in this file.
+
+---
+
+## v0.1.1 hardening — what changed and why (2026-05-03)
+
+v0.1.1 is a **focused security-hardening patch** addressing concrete findings
+from an adversarial review (cryptanalyst, parser-exploit, spec-pedant,
+supply-chain, integration, side-channel, privacy, and implementation-
+differential perspectives). Each change closes a named finding.
+
+### Spec hardening (live in `spec/WISEATA-v0.1.1.md`)
+
+| Finding | Change | Why it matters |
+|---|---|---|
+| **C2** | Reject all control chars (U+0000–U+001F, U+007F) in values | A malicious proof carrying ANSI escape sequences could hijack a terminal when displayed by `wise inspect`. |
+| **C3** | "Whitespace" = ASCII TAB or SPACE only; no Unicode-aware strip | `str.strip()` semantics differ between Python and Rust on Unicode whitespace. Two ports could disagree on the same proof. |
+| **C5** | Keys sorted by UTF-8 byte order, not codepoint order | Spec already required byte order; reference impl was using Python's default codepoint sort. Silent until first non-ASCII key. |
+| **C6** | Length-field bounds checks must use subtraction, not addition | A 32-bit port using `pos + n > len` overflows; subtraction never overflows. Mandatory for conformant ports. |
+| **C7** | Reject UTF-8 BOM (`EF BB BF`) | A permissive Rust UTF-8 decoder might strip the BOM where Python doesn't, causing port disagreement. |
+| **H2** | `origin.created_at` strictly validated as `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$` AND a real calendar moment | Previous behavior accepted `"yesterday"`, `"2099-99-99T..."`, etc. Now rejected. |
+| **H4** | Closed allow-set of permitted top-level keys | Unknown keys are an extension-confusion attack vector. v0.1.0 silently tolerated them. |
+| **H1/H5** | New required field `origin.attestation` (currently only `self_declared`); `origin.creator` restricted to printable ASCII | Closes Unicode homoglyph impersonation (Cyrillic А = Latin A). v0.4 will add `signed` to the attestation enum. |
+
+### Implementation hardening (no spec change)
+
+| Finding | Change | Why it matters |
+|---|---|---|
+| **C1** | All recomputed-digest comparisons use `hmac.compare_digest()` | Closes a timing side-channel: a non-constant-time compare leaks the expected digest one byte at a time to a network attacker measuring verifier latency. |
+| **C4** | Strict integer parsing (ASCII digits, no signs, no leading zeros) | Python `int()` accepts `+5`, `00005`, `５`, `٥`. A Rust port using `parse::<u64>()` rejects them. Without this fix, ports disagree on the same proof bytes. |
+| **H3** | Hard 1 MiB cap on `.wiseproof` files at load time and on the embedded proof section in WISESEAL-V1 | Closes memory-exhaustion DoS on the verifier. A real proof is well under 2 KiB. |
+
+### `wise_id` is preserved across the upgrade
+
+Adding `origin.attestation` could have invalidated the entire content-
+addressing model. **It does not.** `origin.attestation` is in the
+**exclude set** for `wise_id`, so:
+
+> **For any artifact, `wise_id` is unchanged from v0.1.0 to v0.1.1.**
+
+When v0.4 introduces signed proofs, the same property holds: a v0.4 signed
+proof of artifact X has the **same `wise_id`** as a v0.1.1 self-declared
+proof of artifact X. Content addressing survives the attestation upgrade.
+
+`wise_seal` does change — that is its job. `wise_seal` commits to
+attestation state because the per-sealing context includes "was this
+self-declared or signed."
+
+### Known issues NOT fixed in v0.1.1 (deferred)
+
+- **WiseDigest-0 short-input avalanche weakness** — A 1-byte input only
+  fully mutates 3 of 8 state lanes before finalize. Documented as a known
+  structural limitation; SHA-256 fallback recommended for adversarial use.
+  Will be addressed by promotion of WiseDigest-1/-2/-3 once one survives
+  sustained cryptanalysis. (See `research/WiseDigest-Lab.md`.)
+- **WiseDigest-0 ASCII-derived constants ("SPAS", "TRUE", "FAIL") are
+  designer-chosen** — A "nothing up my sleeve" failure. Cryptographers
+  will rightly flag this. WiseDigest-2 and WiseDigest-3 explicitly forbid
+  borrowed and designer-chosen constants in their construction; promotion
+  path documented in `ROADMAP.md`.
+- **WiseExpansion privacy** — A `.wiseexp` exposes 48 bytes of artifact
+  content verbatim plus full byte/bigram/run-length structure. Already
+  disclosed; deserves more prominence. README and SECURITY.md now warn
+  loudly: do not generate or share expansions of secret files.
+- **No SLSA build provenance** — CI runs tests but does not attest to
+  build provenance. Planned for v0.2.0.
+- **PyPI name reservation** — Reserve `wise-origin`, `wisespas`, `wiseata`
+  as a v0.1.1 release-day operational task to block name squatting.
+
+### Reporting hardening regressions
+
+If you find a way to bypass any of the v0.1.1 hardening (e.g., a proof
+with an embedded ANSI escape that nonetheless reaches `wise inspect`,
+or a `wise_id` collision under SHA-256), use the GitHub Security
+Advisory path, not a public issue.
