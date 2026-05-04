@@ -36,12 +36,23 @@ ALGOS=(
   "WiseDigest-3:WD3"
 )
 
-# Auto-size to the machine.
+# Mac-safe defaults: fewer workers, deeper cycles. 6 workers nice'd uses
+# ~60% of efficiency cores and leaves performance cores untouched. 30s
+# per cycle gives each attack room to converge on deeper structure
+# (multi-collision, higher-prefix birthday, deeper differential trails).
+# Same cryptanalytic work as 8 workers at 5s, less thermal stress.
 DETECTED_CORES=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
-DEFAULT_TOTAL=$(( DETECTED_CORES > 4 ? DETECTED_CORES - 2 : 2 ))
+DEFAULT_TOTAL=$(( DETECTED_CORES > 6 ? 6 : DETECTED_CORES / 2 ))
+[[ "$DEFAULT_TOTAL" -lt 2 ]] && DEFAULT_TOTAL=2
 TOTAL_WORKERS="${FLEET_TOTAL:-$DEFAULT_TOTAL}"
 WORKERS_PER_ALGO=$(( TOTAL_WORKERS / ${#ALGOS[@]} ))
 [[ "$WORKERS_PER_ALGO" -lt 1 ]] && WORKERS_PER_ALGO=1
+
+# Default cycle budget: 90s. Each cycle has time for deeper attacks
+# (extended birthday search, deeper multi-collision, longer linear
+# scan). Same total CPU as shorter cycles — just structured for depth
+# over breadth. Override with FLEET_BUDGET=N (5..600 sane).
+FLEET_BUDGET="${FLEET_BUDGET:-90}"
 
 mkdir -p "$RUNTIME_DIR"
 
@@ -72,8 +83,9 @@ case "$cmd" in
   start)
     echo "Fleet sizing for this machine:"
     echo "  detected logical cores: $DETECTED_CORES"
-    echo "  workers (cores - 2):    $TOTAL_WORKERS  (override with FLEET_TOTAL=N)"
+    echo "  total workers:          $TOTAL_WORKERS  (override with FLEET_TOTAL=N)"
     echo "  per-algorithm:          $WORKERS_PER_ALGO  (across ${#ALGOS[@]} truly-novel digests)"
+    echo "  cycle budget:           ${FLEET_BUDGET}s  (override with FLEET_BUDGET=N)"
     echo "  priority:               nice -n 19 (yields to interactive work)"
     echo "  runtime dir:            $RUNTIME_DIR"
     echo
@@ -92,7 +104,7 @@ case "$cmd" in
         # Detached, low-priority, logs to file. Process group setsid lets
         # us send SIGINT cleanly to the worker without touching this shell.
         nohup nice -n 19 "$PYTHON" "$REPO_ROOT/scripts/cryptanalysis-daemon.py" \
-          --worker-id "$wid" --algorithm "$algo" --budget-seconds 5 \
+          --worker-id "$wid" --algorithm "$algo" --budget-seconds "$FLEET_BUDGET" \
           >"$log_file" 2>&1 &
         echo $! > "$pid_file"
         disown 2>/dev/null || true
