@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
 # Launch a cryptanalysis fleet on truly-novel Wise digests.
 #
+# No tmux dependency. Uses `nohup` + `nice -n 19` so workers run in the
+# background at lowest priority. On Apple Silicon, low-priority work
+# preferentially lands on efficiency cores; performance cores stay free
+# for Henry's interactive work.
+#
+# Worker count auto-detects from `sysctl -n hw.ncpu`, defaulting to
+# (cores - 2). Override with `FLEET_TOTAL=N`.
+#
 # Strict originality rule: a digest gets fleet cycles only if it borrows
 # NO pre-existing cryptographic primitive — no SHA family, no BLAKE,
-# no ChaCha, no Keccak, no Merkle-Damgård composition, no IV constants
-# from existing designs (sqrt-of-primes, golden ratio, etc.). Universal
+# no ChaCha, no Keccak, no IV constants from existing designs. Universal
 # primitives (integer add, XOR, rotation) don't count as borrowed.
 #
 # By that rule:
@@ -14,107 +21,168 @@
 #   OUT — WiseDigest-1 (uses BLAKE2b IV and G function)
 #   OUT — SHA-256 (not Henry's; already 25 years of public cryptanalysis)
 #
-# 2 truly-novel digests × 8 workers each = 16 workers. Twice the
-# cryptanalytic pressure per algorithm vs the previous 4-algo fleet.
-#
-# Year-per-week math: 16 workers × 720 cycles/hour ÷ 6 attacks per algo
-# ≈ 480k cycles/week per (algorithm, attack) pair — roughly 2 yrs/week
-# of single-daemon round-robin runtime, concentrated on what is truly Wise.
-#
-# Usage:
-#   bash scripts/launch-fleet.sh start      # spawn the fleet
-#   bash scripts/launch-fleet.sh status     # show all workers + per-algo stats
-#   bash scripts/launch-fleet.sh stop       # SIGINT all workers; clean checkpoint
-#   bash scripts/launch-fleet.sh tail TAG N # peek worker N (TAG=WD0|WD1|WD2|WD3|SHA256)
+# Year-per-week math: 8 workers × 720 cycles/hour ÷ 6 attacks per algo
+# ≈ 240k cycles/week per (algorithm, attack) pair.
 
 set -euo pipefail
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 REPO_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 PYTHON="${PYTHON:-$REPO_ROOT/.venv/bin/python}"
+RUNTIME_DIR="${WD_FLEET_RUNTIME:-/tmp/wd-fleet}"
 
-# Truly-novel-only fleet: 2 Wise digests × 8 workers each = 16 workers.
-#
-# WiseDigest-0 and WiseDigest-1 are EXCLUDED from the fleet:
-#   WD-0 borrows Knuth's golden-ratio multiplier (0x9E3779B9), used in
-#        jhash and FNV variants. Not original.
-#   WD-1 borrows BLAKE2b's IV (sqrt of primes) AND the BLAKE2b G mixing
-#        function verbatim. Not original.
-#
-# WiseDigest-2 and WiseDigest-3 are originality-first by design — their
-# specs explicitly forbid SHA/BLAKE/ChaCha/Keccak cores and borrowed
-# constants. Only addition, XOR, rotation, and Wise-native ASCII
-# constants. These are the truly-novel ones; they get the cycles.
 ALGOS=(
   "WiseDigest-2:WD2"
   "WiseDigest-3:WD3"
 )
-WORKERS_PER_ALGO=8
+
+# Auto-size to the machine.
+DETECTED_CORES=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
+DEFAULT_TOTAL=$(( DETECTED_CORES > 4 ? DETECTED_CORES - 2 : 2 ))
+TOTAL_WORKERS="${FLEET_TOTAL:-$DEFAULT_TOTAL}"
+WORKERS_PER_ALGO=$(( TOTAL_WORKERS / ${#ALGOS[@]} ))
+[[ "$WORKERS_PER_ALGO" -lt 1 ]] && WORKERS_PER_ALGO=1
+
+mkdir -p "$RUNTIME_DIR"
+
+# All worker names this fleet definition would produce.
+all_worker_names() {
+  for entry in "${ALGOS[@]}"; do
+    local tag="${entry##*:}"
+    for ((wid=0; wid<WORKERS_PER_ALGO; wid++)); do
+      printf 'wd-%s-W%02d\n' "$tag" "$wid"
+    done
+  done
+}
+
+# Is the worker named $1 currently running? (PID file exists and points to a live process.)
+is_running() {
+  local name="$1"
+  local pid_file="$RUNTIME_DIR/${name}.pid"
+  [[ -f "$pid_file" ]] || return 1
+  local pid
+  pid=$(<"$pid_file")
+  [[ -n "$pid" ]] || return 1
+  ps -p "$pid" -o pid= >/dev/null 2>&1
+}
 
 cmd="${1:-help}"
 
 case "$cmd" in
   start)
-    total=0
+    echo "Fleet sizing for this machine:"
+    echo "  detected logical cores: $DETECTED_CORES"
+    echo "  workers (cores - 2):    $TOTAL_WORKERS  (override with FLEET_TOTAL=N)"
+    echo "  per-algorithm:          $WORKERS_PER_ALGO  (across ${#ALGOS[@]} truly-novel digests)"
+    echo "  priority:               nice -n 19 (yields to interactive work)"
+    echo "  runtime dir:            $RUNTIME_DIR"
+    echo
+    spawned=0
     for entry in "${ALGOS[@]}"; do
       algo="${entry%%:*}"
       tag="${entry##*:}"
       for ((wid=0; wid<WORKERS_PER_ALGO; wid++)); do
-        session="wd-${tag}-W$(printf '%02d' "$wid")"
-        if tmux has-session -t "$session" 2>/dev/null; then
-          echo "  $session already running — skipping"
+        name="wd-${tag}-W$(printf '%02d' "$wid")"
+        pid_file="$RUNTIME_DIR/${name}.pid"
+        log_file="$RUNTIME_DIR/${name}.log"
+        if is_running "$name"; then
+          echo "  $name already running (pid $(<"$pid_file")) — skipping"
           continue
         fi
-        tmux new-session -d -s "$session" \
-          "cd $REPO_ROOT && $PYTHON scripts/cryptanalysis-daemon.py \
-            --worker-id $wid --algorithm '$algo' --budget-seconds 5"
-        echo "  spawned $session  (algorithm: $algo)"
-        total=$((total+1))
+        # Detached, low-priority, logs to file. Process group setsid lets
+        # us send SIGINT cleanly to the worker without touching this shell.
+        nohup nice -n 19 "$PYTHON" "$REPO_ROOT/scripts/cryptanalysis-daemon.py" \
+          --worker-id "$wid" --algorithm "$algo" --budget-seconds 5 \
+          >"$log_file" 2>&1 &
+        echo $! > "$pid_file"
+        disown 2>/dev/null || true
+        echo "  spawned $name  pid=$(<"$pid_file")  algorithm=$algo  log=$log_file"
+        spawned=$((spawned+1))
       done
     done
     echo
-    echo "Fleet up: $total workers, ${#ALGOS[@]} algorithms × $WORKERS_PER_ALGO workers."
-    echo "Use 'bash scripts/launch-fleet.sh status' to peek."
+    echo "Fleet up: $spawned new workers."
+    echo "  status:   bash scripts/launch-fleet.sh status"
+    echo "  peek:     bash scripts/launch-fleet.sh tail WD2 0"
+    echo "  stop:     bash scripts/launch-fleet.sh stop"
     ;;
   status)
     echo "Wise digest cryptanalysis fleet"
     echo "================================"
-    tmux list-sessions 2>/dev/null | grep '^wd-' || echo "no workers running"
+    running=0
+    dead=0
+    while IFS= read -r name; do
+      if is_running "$name"; then
+        printf "  %-18s  pid=%-8s  RUNNING\n" "$name" "$(<"$RUNTIME_DIR/${name}.pid")"
+        running=$((running+1))
+      else
+        printf "  %-18s  pid=%-8s  not running\n" "$name" "$(cat "$RUNTIME_DIR/${name}.pid" 2>/dev/null || echo "-")"
+        dead=$((dead+1))
+      fi
+    done < <(all_worker_names)
+    echo
+    echo "  $running running, $dead not running"
     echo
     if ls "$REPO_ROOT/research/state-"*.json >/dev/null 2>&1; then
       $PYTHON "$REPO_ROOT/scripts/fleet-summary.py"
+    else
+      echo "  (no state files yet — workers may not have completed a cycle)"
     fi
     ;;
   stop)
-    echo "Stopping fleet (SIGINT to each worker; clean checkpoint)..."
-    while IFS= read -r session; do
-      tmux send-keys -t "$session" C-c
-      echo "  sent SIGINT to $session"
-    done < <(tmux list-sessions 2>/dev/null | grep '^wd-' | cut -d: -f1)
-    sleep 2
-    while IFS= read -r session; do
-      tmux kill-session -t "$session" 2>/dev/null || true
-    done < <(tmux list-sessions 2>/dev/null | grep '^wd-' | cut -d: -f1)
-    echo "Fleet stopped. State files preserved in research/"
+    echo "Stopping fleet (SIGINT — clean checkpoint)..."
+    stopped=0
+    while IFS= read -r name; do
+      pid_file="$RUNTIME_DIR/${name}.pid"
+      [[ -f "$pid_file" ]] || continue
+      pid=$(<"$pid_file")
+      if ps -p "$pid" -o pid= >/dev/null 2>&1; then
+        kill -SIGINT "$pid" 2>/dev/null && echo "  SIGINT -> $name (pid $pid)" && stopped=$((stopped+1))
+      fi
+    done < <(all_worker_names)
+    sleep 3
+    # Anything still alive after 3s gets a SIGTERM.
+    while IFS= read -r name; do
+      pid_file="$RUNTIME_DIR/${name}.pid"
+      [[ -f "$pid_file" ]] || continue
+      pid=$(<"$pid_file")
+      if ps -p "$pid" -o pid= >/dev/null 2>&1; then
+        kill -SIGTERM "$pid" 2>/dev/null && echo "  SIGTERM -> $name (pid $pid)"
+      fi
+      rm -f "$pid_file"
+    done < <(all_worker_names)
+    echo
+    echo "Stopped $stopped workers. State preserved in research/. Logs in $RUNTIME_DIR/."
     ;;
   tail)
-    tag="${2:-WD0}"
+    tag="${2:-WD2}"
     n="${3:-0}"
-    session="wd-${tag}-W$(printf '%02d' "$n")"
-    if tmux has-session -t "$session" 2>/dev/null; then
-      tmux capture-pane -t "$session" -p | tail -30
-    else
-      echo "no worker $session running"
+    name="wd-${tag}-W$(printf '%02d' "$n")"
+    log_file="$RUNTIME_DIR/${name}.log"
+    if [[ ! -f "$log_file" ]]; then
+      echo "no log for $name (expected at $log_file)"
+      exit 1
     fi
+    tail -n 30 "$log_file"
+    ;;
+  logs)
+    echo "Recent log lines from every worker:"
+    while IFS= read -r name; do
+      log_file="$RUNTIME_DIR/${name}.log"
+      [[ -f "$log_file" ]] || continue
+      echo "--- $name ---"
+      tail -n 3 "$log_file"
+    done < <(all_worker_names)
     ;;
   *)
     cat <<EOF
-Wise digest cryptanalysis fleet — authentically-Wise only
+Wise digest cryptanalysis fleet — truly-Henry-only, Mac-friendly
 Usage:
-  bash scripts/launch-fleet.sh start             # spawn ${#ALGOS[@]}×${WORKERS_PER_ALGO} workers
+  bash scripts/launch-fleet.sh start             # spawn ${#ALGOS[@]}×${WORKERS_PER_ALGO} workers via nohup
   bash scripts/launch-fleet.sh status            # show all workers + per-algo stats
-  bash scripts/launch-fleet.sh stop              # checkpoint and stop fleet
-  bash scripts/launch-fleet.sh tail TAG N        # peek (TAG=WD0|WD1|WD2|WD3)
+  bash scripts/launch-fleet.sh stop              # SIGINT all workers; clean checkpoint
+  bash scripts/launch-fleet.sh tail TAG N        # peek (TAG=WD2|WD3)
+  bash scripts/launch-fleet.sh logs              # last 3 lines from every worker
 
 Algorithms attacked (truly-novel-to-Henry-only, no borrowed primitives):
   WiseDigest-2   originality-first; 768-bit state, no SHA/BLAKE/ChaCha/Keccak cores,
@@ -127,7 +195,8 @@ EXCLUDED from the fleet (because they reuse pre-existing primitives):
   WiseDigest-1   borrows BLAKE2b's IV and G function
   SHA-256        not Henry's; has 25 years of public cryptanalysis already
 
-Every fleet cycle hardens what's truly novel and truly Henry's.
+Workers run at nice -n 19. On Apple Silicon they preferentially land on
+efficiency cores, leaving performance cores for normal Mac use.
 EOF
     ;;
 esac
