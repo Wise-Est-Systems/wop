@@ -20,3 +20,9 @@ demo.txt
 # but release-manifest seals are part of the repo (cryptawiselization).
 !release-*.manifest.wiseproof
 !release-*.manifest.wiseseal
+
+# Cryptanalysis fleet runtime files. State JSON updates every cycle, so
+# don't track it. Journals are durable; track explicitly when worth
+# preserving (`git add -f research/journal-WD0-W00.md`).
+research/state-*.json
+research/journal-WD*.md
