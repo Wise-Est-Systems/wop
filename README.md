@@ -154,6 +154,42 @@ WISEATA proves **integrity**, **identity**, and **reproducibility**. It does **n
 
 ---
 
+## Verifying a release (cryptawiselization)
+
+Every release of WISEATA is sealed with WISEATA's own primitives. The
+protocol that witnesses every other artifact, witnesses itself.
+
+For the v0.1.1 release, two artifacts in the repo root carry the
+self-witness:
+
+- `release-v0.1.1.manifest` — sorted `<wisedigest0-hex>  <path>` pairs for
+  every tracked file in the v0.1.1 source state.
+- `release-v0.1.1.manifest.wiseproof` — a `.wiseproof` of the manifest,
+  sealed by `Henry Wayne Wise III`.
+
+To verify a release you cloned, end-to-end:
+
+```bash
+# 1. Verify the manifest itself has not been tampered with.
+wise check release-v0.1.1.manifest release-v0.1.1.manifest.wiseproof
+# → VERIFIED
+
+# 2. Verify every file in the repo matches the manifest.
+python scripts/seal-release.py v0.1.1 --verify
+# → release v0.1.1 VERIFIED — manifest + proof both intact
+```
+
+If either command returns anything other than `VERIFIED`, the source
+you're holding has drifted from what was released. The witness on the
+release proof — `Henry Wayne Wise III` — is fixed for v0.1.1; a
+different creator means a different (unauthorized) seal.
+
+This whole verification path is **stdlib + the wise CLI you just
+installed.** No server, no network, no platform. The protocol verifies
+itself the same way it verifies anything else.
+
+---
+
 ## FAQ
 
 **Is this a blockchain?**

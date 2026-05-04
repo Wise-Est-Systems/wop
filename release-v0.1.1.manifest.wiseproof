@@ -1,0 +1,13 @@
+WISEPROOF-V1
+
+artifact.name=release-v0.1.1.manifest
+artifact.size_bytes=5119
+artifact.type=file
+measurement.algorithm=WiseDigest-0
+measurement.digest=991ef6e0dd9b4e91285ceef2a152b0cd2b2cbdbbb8c4d961246dc0a9c8f941f8
+origin.attestation=self_declared
+origin.created_at=2026-05-03T00:00:00Z
+origin.creator=Henry Wayne Wise III
+origin.mode=local
+wise_id=883f89eb26073f323615e5905e9152eb7cd3afc093becc6bd5de20a10cd5f642
+wise_seal=f5ae8a2a6c5bf15bd0038ef679bded3d20207e5a091dd234dcd6929f0a2be4eb

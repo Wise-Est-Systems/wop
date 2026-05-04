@@ -440,3 +440,69 @@ def test_disclosure_phrasing_uses_first_person_we():
     assert any(m in text for m in first_person_markers), (
         "SECURITY.md no longer uses first-person voice — maker's voice stripped"
     )
+
+
+# ============================================================================
+# CRYPTAWISELIZATION — WOP signs itself in its own primitive
+# ============================================================================
+# The protocol that witnesses every other artifact, witnesses itself. Every
+# release ships with a manifest + proof sealed by Henry Wayne Wise III. The
+# manifest commits to every tracked file's WiseDigest-0; the proof commits
+# to the manifest. If either drifts, this test breaks the build.
+
+
+def test_release_manifest_verifies_against_its_own_proof():
+    """**Cryptawiselization invariant.**
+
+    Every `release-*.manifest` in the repo root MUST have a matching
+    `.wiseproof` next to it, AND that proof MUST verify the manifest
+    using WISEATA's own verifier.
+
+    If this fails:
+      - someone modified the manifest without re-sealing, OR
+      - someone modified the proof, OR
+      - the verifier broke (which other tests would also catch)
+
+    The witness on every release MUST be Henry Wayne Wise III. A
+    different creator means an unauthorized seal — caller is forging.
+    """
+    import glob
+    import os
+
+    from wise.verify import load_proof, verify_file
+
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    manifests = sorted(glob.glob(os.path.join(repo_root, "release-*.manifest")))
+
+    # If no release has been sealed yet, this test is a no-op. Once a
+    # release exists, every subsequent CI run re-verifies it.
+    if not manifests:
+        return
+
+    for manifest_path in manifests:
+        proof_path = manifest_path + ".wiseproof"
+        rel_name = os.path.basename(manifest_path)
+
+        assert os.path.exists(proof_path), (
+            f"release manifest {rel_name} has no .wiseproof — "
+            "cryptawiselization invariant broken"
+        )
+
+        items, err = load_proof(proof_path)
+        assert err is None, (
+            f"{rel_name}.wiseproof failed to load: "
+            f"{err.detail if err else 'unknown'}"
+        )
+        assert items is not None
+
+        result = verify_file(manifest_path, items)
+        assert result.status == "VERIFIED", (
+            f"release manifest {rel_name} no longer verifies: "
+            f"{result.status} — {result.detail}. "
+            "Either the manifest text drifted, or the proof was tampered with."
+        )
+
+        assert items["origin.creator"] == "Henry Wayne Wise III", (
+            f"{rel_name} sealed by {items['origin.creator']!r}, "
+            "not by the witnessed name. Unauthorized release seal."
+        )

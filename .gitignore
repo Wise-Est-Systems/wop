@@ -16,3 +16,7 @@ demo.txt
 *.wiseseal
 !tests/vectors/*.wiseproof
 !tests/vectors/*.wiseseal
+
+# but release-manifest seals are part of the repo (cryptawiselization).
+!release-*.manifest.wiseproof
+!release-*.manifest.wiseseal
