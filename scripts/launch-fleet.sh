@@ -1,19 +1,25 @@
 #!/usr/bin/env bash
-# Launch a cryptanalysis fleet on every authentically-Wise digest.
+# Launch a cryptanalysis fleet on truly-novel Wise digests.
 #
-# Focus: only what Henry Wayne Wise III made. SHA-256 is the production
-# fallback per SECURITY.md but is not part of the fleet — its 25 years
-# of academic cryptanalysis are already on the record. The fleet's cycles
-# go entirely to hardening the original Wise digest family.
+# Strict originality rule: a digest gets fleet cycles only if it borrows
+# NO pre-existing cryptographic primitive — no SHA family, no BLAKE,
+# no ChaCha, no Keccak, no Merkle-Damgård composition, no IV constants
+# from existing designs (sqrt-of-primes, golden ratio, etc.). Universal
+# primitives (integer add, XOR, rotation) don't count as borrowed.
 #
-# 4 algorithms × 4 workers each = 16 workers, all running 5s cycles in
-# parallel tmux sessions. Each algorithm gets its own state/journal files.
-# At the end of any time window, fleet-summary.py shows per-algorithm
-# stats so you can see where each candidate stands.
+# By that rule:
+#   IN  — WiseDigest-2 (originality-first, 768-bit state)
+#   IN  — WiseDigest-3 (originality-first, 793-bit prime-based state)
+#   OUT — WiseDigest-0 (uses Knuth's 0x9E3779B9 golden-ratio multiplier)
+#   OUT — WiseDigest-1 (uses BLAKE2b IV and G function)
+#   OUT — SHA-256 (not Henry's; already 25 years of public cryptanalysis)
 #
-# Year-per-week math: 16 workers × 720 cycles/hour ÷ ~7 attacks per algo
-# ≈ 240k cycles/week per attack class — equivalent to ~1.1 years of
-# single-daemon round-robin runtime per (algorithm, attack) pair.
+# 2 truly-novel digests × 8 workers each = 16 workers. Twice the
+# cryptanalytic pressure per algorithm vs the previous 4-algo fleet.
+#
+# Year-per-week math: 16 workers × 720 cycles/hour ÷ 6 attacks per algo
+# ≈ 480k cycles/week per (algorithm, attack) pair — roughly 2 yrs/week
+# of single-daemon round-robin runtime, concentrated on what is truly Wise.
 #
 # Usage:
 #   bash scripts/launch-fleet.sh start      # spawn the fleet
@@ -27,14 +33,23 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 REPO_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 PYTHON="${PYTHON:-$REPO_ROOT/.venv/bin/python}"
 
-# 4 Wise digests × 4 workers each = 16 workers. Authentically-Wise only.
+# Truly-novel-only fleet: 2 Wise digests × 8 workers each = 16 workers.
+#
+# WiseDigest-0 and WiseDigest-1 are EXCLUDED from the fleet:
+#   WD-0 borrows Knuth's golden-ratio multiplier (0x9E3779B9), used in
+#        jhash and FNV variants. Not original.
+#   WD-1 borrows BLAKE2b's IV (sqrt of primes) AND the BLAKE2b G mixing
+#        function verbatim. Not original.
+#
+# WiseDigest-2 and WiseDigest-3 are originality-first by design — their
+# specs explicitly forbid SHA/BLAKE/ChaCha/Keccak cores and borrowed
+# constants. Only addition, XOR, rotation, and Wise-native ASCII
+# constants. These are the truly-novel ones; they get the cycles.
 ALGOS=(
-  "WiseDigest-0:WD0"
-  "WiseDigest-1:WD1"
   "WiseDigest-2:WD2"
   "WiseDigest-3:WD3"
 )
-WORKERS_PER_ALGO=4
+WORKERS_PER_ALGO=8
 
 cmd="${1:-help}"
 
@@ -101,14 +116,18 @@ Usage:
   bash scripts/launch-fleet.sh stop              # checkpoint and stop fleet
   bash scripts/launch-fleet.sh tail TAG N        # peek (TAG=WD0|WD1|WD2|WD3)
 
-Algorithms attacked in parallel (all original to Henry Wayne Wise III):
-  WiseDigest-0   shipped baseline; ASCII-encoded constants WISE-ORIG-IN00-SPAS-TRUE-FAIL-PROF-001
-  WiseDigest-1   research candidate; sponge construction, 512-bit state
-  WiseDigest-2   research candidate; originality-first, 768-bit state, no borrowed cores
-  WiseDigest-3   research candidate; 793-bit live state, 13×61-bit lanes, off-grid
+Algorithms attacked (truly-novel-to-Henry-only, no borrowed primitives):
+  WiseDigest-2   originality-first; 768-bit state, no SHA/BLAKE/ChaCha/Keccak cores,
+                 no borrowed constants. Wise-native ASCII only.
+  WiseDigest-3   793-bit live state (13×61, both prime); off-grid by construction.
+                 Same originality rule, even stricter.
 
-SHA-256 is not part of the fleet — it has 25 years of public cryptanalysis
-already. Every fleet cycle hardens the Wise digest family directly.
+EXCLUDED from the fleet (because they reuse pre-existing primitives):
+  WiseDigest-0   borrows Knuth's 0x9E3779B9 (golden-ratio multiplier)
+  WiseDigest-1   borrows BLAKE2b's IV and G function
+  SHA-256        not Henry's; has 25 years of public cryptanalysis already
+
+Every fleet cycle hardens what's truly novel and truly Henry's.
 EOF
     ;;
 esac
